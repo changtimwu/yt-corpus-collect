@@ -23,6 +23,8 @@ def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, ma
         opts["postprocessor_args"] = {"ffmpeg": ["-ar", "16000", "-ac", "1"]}
 
     opts.update({
+        "writeinfojson": True,
+        "writedescription": True,
         "writesubtitles": not no_subs,
         "writeautomaticsub": not no_subs,
         "subtitleslangs": [lang],
