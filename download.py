@@ -9,7 +9,7 @@ from pathlib import Path
 import yt_dlp
 
 
-def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool) -> dict:
+def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, max_videos: int | None) -> dict:
     outtmpl = str(output_dir / "%(id)s" / "%(id)s.%(ext)s")
     postprocessors = [
         {
@@ -31,6 +31,7 @@ def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool) ->
         "postprocessor_args": {
             "ffmpeg": ["-ar", "16000", "-ac", "1"],
         },
+        "playlistend": max_videos,
         "writesubtitles": not no_subs,
         "writeautomaticsub": not no_subs,
         "subtitleslangs": [lang],
@@ -100,12 +101,16 @@ def main() -> None:
         "--no-subs", action="store_true",
         help="Skip subtitle/transcript download",
     )
+    parser.add_argument(
+        "--max-videos", type=int, default=None, metavar="N",
+        help="Stop after downloading N videos (useful for large playlists)",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    opts = build_opts(output_dir, args.audio_format, args.lang, args.no_subs)
+    opts = build_opts(output_dir, args.audio_format, args.lang, args.no_subs, args.max_videos)
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ret = ydl.download(args.urls)
