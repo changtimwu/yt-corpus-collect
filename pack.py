@@ -120,44 +120,53 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter) -> int:
         return 0
 
     m4a_path = m4a_files[0]
-    video_ids, files, audios, transcriptions, starts, ends = [], [], [], [], [], []
-    titles, channels, upload_dates = [], [], []
+    BATCH_SIZE = 20  # write every N segments to keep memory bounded
+    buf: dict = {k: [] for k in ('video_id', 'file', 'audio', 'transcription',
+                                  'start', 'end', 'title', 'channel', 'upload_date')}
+    written = 0
+
+    def flush(buf: dict) -> int:
+        if not buf['video_id']:
+            return 0
+        batch = pa.record_batch({
+            'video_id': pa.array(buf['video_id'], pa.string()),
+            'file': pa.array(buf['file'], pa.string()),
+            'audio': pa.array(buf['audio'], pa.struct([
+                pa.field('bytes', pa.binary()),
+                pa.field('path', pa.string()),
+            ])),
+            'transcription': pa.array(buf['transcription'], pa.string()),
+            'start': pa.array(buf['start'], pa.float32()),
+            'end': pa.array(buf['end'], pa.float32()),
+            'title': pa.array(buf['title'], pa.string()),
+            'channel': pa.array(buf['channel'], pa.string()),
+            'upload_date': pa.array(buf['upload_date'], pa.string()),
+        }, schema=SCHEMA)
+        writer.write_batch(batch)
+        n = len(buf['video_id'])
+        for v in buf.values():
+            v.clear()
+        return n
 
     for idx, seg in enumerate(segments):
         wav = extract_clip(m4a_path, seg['start'], seg['end'])
         if not wav:
             continue
         filename = f'{video_id}_{idx+1:04d}.wav'
-        video_ids.append(video_id)
-        files.append(filename)
-        audios.append({'bytes': wav, 'path': filename})
-        transcriptions.append(seg['text'])
-        starts.append(seg['start'])
-        ends.append(seg['end'])
-        titles.append(title)
-        channels.append(channel)
-        upload_dates.append(upload_date)
+        buf['video_id'].append(video_id)
+        buf['file'].append(filename)
+        buf['audio'].append({'bytes': wav, 'path': filename})
+        buf['transcription'].append(seg['text'])
+        buf['start'].append(seg['start'])
+        buf['end'].append(seg['end'])
+        buf['title'].append(title)
+        buf['channel'].append(channel)
+        buf['upload_date'].append(upload_date)
+        if len(buf['video_id']) >= BATCH_SIZE:
+            written += flush(buf)
 
-    if not video_ids:
-        return 0
-
-    batch = pa.record_batch({
-        'video_id': pa.array(video_ids, pa.string()),
-        'file': pa.array(files, pa.string()),
-        'audio': pa.array(audios, pa.struct([
-            pa.field('bytes', pa.binary()),
-            pa.field('path', pa.string()),
-        ])),
-        'transcription': pa.array(transcriptions, pa.string()),
-        'start': pa.array(starts, pa.float32()),
-        'end': pa.array(ends, pa.float32()),
-        'title': pa.array(titles, pa.string()),
-        'channel': pa.array(channels, pa.string()),
-        'upload_date': pa.array(upload_dates, pa.string()),
-    }, schema=SCHEMA)
-
-    writer.write_batch(batch)
-    return len(video_ids)
+    written += flush(buf)
+    return written
 
 
 def main() -> None:
