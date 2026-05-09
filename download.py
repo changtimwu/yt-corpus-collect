@@ -11,27 +11,26 @@ import yt_dlp
 
 def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, max_videos: int | None) -> dict:
     outtmpl = str(output_dir / "%(id)s" / "%(id)s.%(ext)s")
-    postprocessors = [
-        {
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": audio_format,
-        },
-    ]
 
-    return {
+    opts: dict = {
         "format": "bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": outtmpl,
-        "postprocessors": postprocessors,
-        "postprocessor_args": {
-            "ffmpeg": ["-ar", "16000", "-ac", "1"],
-        },
         "playlistend": max_videos,
+    }
+
+    if audio_format != "m4a":
+        opts["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": audio_format}]
+        opts["postprocessor_args"] = {"ffmpeg": ["-ar", "16000", "-ac", "1"]}
+
+    opts.update({
         "writesubtitles": not no_subs,
         "writeautomaticsub": not no_subs,
         "subtitleslangs": [lang],
         "subtitlesformat": "vtt",
         "ignoreerrors": True,
-    }
+    })
+
+    return opts
 
 
 def write_manifest(output_dir: Path, audio_format: str) -> None:
@@ -84,8 +83,8 @@ def main() -> None:
         help="Output directory (default: corpus/)",
     )
     parser.add_argument(
-        "--audio-format", default="wav", choices=["wav", "flac", "mp3"],
-        help="Audio format (default: wav)",
+        "--audio-format", default="m4a", choices=["m4a", "wav", "flac", "mp3"],
+        help="Audio format; m4a keeps the original stream without re-encoding (default: m4a)",
     )
     parser.add_argument(
         "--lang", default="zh-TW",
