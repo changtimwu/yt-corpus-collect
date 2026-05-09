@@ -95,6 +95,40 @@ def extract_clip(m4a_path: Path, start: float, end: float) -> bytes:
     return result.stdout if result.returncode == 0 else b''
 
 
+def merge_segments(
+    segments: list[dict],
+    target: float = 10.0,
+    max_dur: float = 20.0,
+    min_dur: float = 1.5,
+) -> list[dict]:
+    """Merge consecutive short VTT cues into longer, self-contained segments.
+
+    YouTube CC cues average ~1.7s each with no gaps or punctuation, making
+    them too short for ASR training. Accumulate until target duration is
+    reached, then emit as one merged segment.
+    """
+    merged = []
+    buf_texts: list[str] = []
+    buf_start: float = 0.0
+    buf_end: float = 0.0
+
+    for seg in segments:
+        if not buf_texts:
+            buf_start = seg['start']
+        buf_end = seg['end']
+        buf_texts.append(seg['text'])
+
+        if buf_end - buf_start >= target or buf_end - buf_start >= max_dur:
+            merged.append({'start': buf_start, 'end': buf_end, 'text': ' '.join(buf_texts)})
+            buf_texts = []
+
+    # flush remainder
+    if buf_texts and buf_end - buf_start >= min_dur:
+        merged.append({'start': buf_start, 'end': buf_end, 'text': ' '.join(buf_texts)})
+
+    return merged
+
+
 def pack_video(video_dir: Path, writer: pq.ParquetWriter) -> int:
     """Pack one video dir into the writer. Returns number of segments written."""
     video_id = video_dir.name
@@ -115,7 +149,7 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter) -> int:
         channel = info.get('channel', '')
         upload_date = info.get('upload_date', '')
 
-    segments = parse_vtt(vtt_files[0])
+    segments = merge_segments(parse_vtt(vtt_files[0]))
     if not segments:
         return 0
 
