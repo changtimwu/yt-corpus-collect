@@ -17,12 +17,6 @@ def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, ma
             "preferredcodec": audio_format,
         },
     ]
-    # Resample to 16 kHz mono — standard for ASR/TTS training
-    if audio_format in ("wav", "flac"):
-        postprocessors.append({
-            "key": "FFmpegPostProcessor",
-            "preferedformat": audio_format,
-        })
 
     return {
         "format": "bestaudio[ext=m4a]/bestaudio/best",
@@ -94,8 +88,8 @@ def main() -> None:
         help="Audio format (default: wav)",
     )
     parser.add_argument(
-        "--lang", default="en",
-        help="Subtitle language code (default: en)",
+        "--lang", default="zh-TW",
+        help="Subtitle language code (default: zh-TW)",
     )
     parser.add_argument(
         "--no-subs", action="store_true",
