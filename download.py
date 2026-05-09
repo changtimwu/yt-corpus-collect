@@ -24,7 +24,6 @@ def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, ma
 
     opts.update({
         "writeinfojson": True,
-        "writedescription": True,
         "writesubtitles": not no_subs,
         "writeautomaticsub": not no_subs,
         "subtitleslangs": [lang],
