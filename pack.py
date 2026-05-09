@@ -81,14 +81,14 @@ def parse_vtt(vtt_path: Path) -> list[dict]:
 
 
 def extract_clip(m4a_path: Path, start: float, end: float) -> bytes:
-    """Return 16kHz mono WAV bytes for the given time range."""
+    """Return m4a bytes for the given time range using AAC stream copy (no decode)."""
     cmd = [
         'ffmpeg', '-y', '-loglevel', 'error',
         '-ss', str(start),
         '-i', str(m4a_path),
         '-t', str(end - start),
-        '-ar', '16000', '-ac', '1',
-        '-f', 'wav', '-acodec', 'pcm_s16le',
+        '-c:a', 'copy',
+        '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov',
         'pipe:1',
     ]
     result = subprocess.run(cmd, capture_output=True)
@@ -186,7 +186,7 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter) -> int:
         wav = extract_clip(m4a_path, seg['start'], seg['end'])
         if not wav:
             continue
-        filename = f'{video_id}_{idx+1:04d}.wav'
+        filename = f'{video_id}_{idx+1:04d}.m4a'
         buf['video_id'].append(video_id)
         buf['file'].append(filename)
         buf['audio'].append({'bytes': wav, 'path': filename})
