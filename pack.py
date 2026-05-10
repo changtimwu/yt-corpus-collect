@@ -7,6 +7,7 @@ extracted from the m4a, matching the schema of ky552/ML2021_ASR_ST.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -14,6 +15,10 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from google import genai
+from google.genai import types
+
+_GEMINI_MODEL = 'gemini-3.1-flash-lite'
 
 _TS_RE = re.compile(r'(\d+):(\d+):(\d+)[.,](\d+)')
 _TAG_RE = re.compile(r'<[^>]+>')
@@ -95,6 +100,41 @@ def extract_clip(m4a_path: Path, start: float, end: float) -> bytes:
     return result.stdout if result.returncode == 0 else b''
 
 
+def segment_with_gemini(cues: list[dict], client: genai.Client) -> list[dict]:
+    """Use Gemini to group cues into natural sentences. Returns same {start,end,text} format."""
+    numbered = '\n'.join(f'[{i}] {c["text"]}' for i, c in enumerate(cues))
+    prompt = f"""\
+以下是台灣中文影片的字幕，每行格式為「[編號] 文字」。
+請將連續的字幕單元合併成語義完整的自然句子，不要在句子中間切斷。
+
+輸出：JSON 陣列，每個元素是一組連續字幕編號（整數陣列），代表同一句子。
+只輸出 JSON，不要其他說明文字。範例：[[0,1,2],[3,4],[5,6,7]]
+
+字幕：
+{numbered}"""
+
+    response = client.models.generate_content(
+        model=_GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(response_mime_type='application/json'),
+    )
+    text = re.sub(r'^```[a-z]*\n?|\n?```$', '', response.text.strip())
+    groups = json.loads(text)
+
+    n = len(cues)
+    groups = [[i for i in g if 0 <= i < n] for g in groups]
+    groups = [g for g in groups if g]
+
+    return [
+        {
+            'start': cues[g[0]]['start'],
+            'end': cues[g[-1]]['end'],
+            'text': ''.join(cues[i]['text'] for i in g),
+        }
+        for g in groups
+    ]
+
+
 def merge_segments(
     segments: list[dict],
     target: float = 10.0,
@@ -129,7 +169,8 @@ def merge_segments(
     return merged
 
 
-def pack_video(video_dir: Path, writer: pq.ParquetWriter) -> int:
+def pack_video(video_dir: Path, writer: pq.ParquetWriter,
+               gemini_client: genai.Client | None = None) -> int:
     """Pack one video dir into the writer. Returns number of segments written."""
     video_id = video_dir.name
 
@@ -149,7 +190,15 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter) -> int:
         channel = info.get('channel', '')
         upload_date = info.get('upload_date', '')
 
-    segments = merge_segments(parse_vtt(vtt_files[0]))
+    cues = parse_vtt(vtt_files[0])
+    if gemini_client is not None:
+        try:
+            segments = segment_with_gemini(cues, gemini_client)
+        except Exception as e:
+            print(f'    Gemini error ({e}), falling back to merge_segments', file=sys.stderr)
+            segments = merge_segments(cues)
+    else:
+        segments = merge_segments(cues)
     if not segments:
         return 0
 
@@ -225,12 +274,21 @@ def main() -> None:
     if args.max_videos:
         video_dirs = video_dirs[:args.max_videos]
 
+    api_key = os.environ.get('GEMINI_API_KEY')
+    if api_key:
+        gemini_client = genai.Client(api_key=api_key)
+        print(f'Gemini segmentation enabled ({_GEMINI_MODEL})')
+    else:
+        gemini_client = None
+        print('Warning: GEMINI_API_KEY not set — using rule-based merge_segments() fallback.',
+              file=sys.stderr)
+
     print(f'Packing {len(video_dirs)} videos → {args.output}')
 
     total_segments = 0
     with pq.ParquetWriter(args.output, SCHEMA, compression='snappy') as writer:
         for i, video_dir in enumerate(video_dirs, 1):
-            n = pack_video(video_dir, writer)
+            n = pack_video(video_dir, writer, gemini_client)
             total_segments += n
             print(f'  [{i}/{len(video_dirs)}] {video_dir.name}: {n} segments', flush=True)
 

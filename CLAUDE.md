@@ -39,9 +39,32 @@ nohup .venv/bin/python -u pack.py --output dataset.parquet > pack.log 2>&1 &
 tail -3 pack.log && grep -c "^\[" pack.log
 ```
 
-- Reads `corpus/`, slices each VTT segment from the m4a via ffmpeg, embeds 16 kHz mono WAV bytes into parquet
+- Reads `corpus/`, slices each VTT segment from the m4a via ffmpeg, embeds audio bytes into parquet
 - Writes in batches of 20 segments to keep memory bounded (critical — large videos can have 1000+ segments)
 - Output schema matches [ky552/ML2021_ASR_ST](https://huggingface.co/datasets/ky552/ML2021_ASR_ST): `audio` (struct with embedded bytes), `transcription`, `file`, plus `video_id`, `start`, `end`, `title`, `channel`, `upload_date`
+- If `GEMINI_API_KEY` is set, uses Gemini (`gemini-3.1-flash-lite`) for sentence-level VTT segmentation; otherwise falls back to rule-based `merge_segments()` with a warning
+
+### `search.py` — find company mentions in transcripts
+
+```bash
+.venv/bin/python search.py dataset.parquet -o results.csv
+.venv/bin/python search.py dataset.parquet --companies twse_stock_list.csv twse_otc_stocks.csv
+```
+
+- Searches every transcript segment for TWSE/OTC equity mentions (plain stocks only, CFICode `ES*`)
+- Matches both company names and 4-digit ticker codes using Aho-Corasick multi-pattern search
+- Input CSVs: `twse_stock_list.csv` (TWSE) and `twse_otc_stocks.csv` (OTC)
+- Output CSV columns: `video_id`, `title`, `channel`, `upload_date`, `start`, `end`, `transcription`, `matched_codes`, `matched_names` (pipe-separated when multiple)
+
+### `segment_vtt.py` — standalone Gemini VTT segmentation example
+
+```bash
+source ../common.env
+.venv/bin/python segment_vtt.py corpus/VIDEO_ID/VIDEO_ID.zh-TW.vtt
+# output: corpus/VIDEO_ID/VIDEO_ID.zh-TW.segmented.vtt
+```
+
+- Standalone tool to preview Gemini segmentation output on a single VTT before a full pack run
 
 ## Architecture
 
@@ -49,11 +72,13 @@ Two independent scripts connected by the `corpus/` directory:
 
 ```
 download.py → corpus/<id>/{.m4a, .vtt, .info.json} → pack.py → dataset.parquet
+                                                                        ↓
+                                                 search.py + twse_*.csv → results.csv
 ```
 
 **`download.py`** is a thin wrapper around `yt_dlp.YoutubeDL`. All download behaviour is controlled by the options dict in `build_opts()`. The VTT subtitle lang code must match what YouTube actually provides — for this playlist it's `zh-TW` (manually created CC), not `zh-Hant` or `en`.
 
-**`pack.py`** has three stages per video: `parse_vtt()` → `extract_clip()` (ffmpeg subprocess) → `flush()` (pyarrow batch write). The VTT deduplication in `parse_vtt()` removes consecutive identical cues — YouTube repeats the previous line in each new cue for smooth scrolling. The `ParquetWriter` stays open across all videos; `flush()` is called every 20 segments to avoid OOM.
+**`pack.py`** has three stages per video: `parse_vtt()` → segmentation → `extract_clip()` (ffmpeg subprocess) → `flush()` (pyarrow batch write). The VTT deduplication in `parse_vtt()` removes consecutive identical cues — YouTube repeats the previous line in each new cue for smooth scrolling. Segmentation uses Gemini if `GEMINI_API_KEY` is set, otherwise `merge_segments()`. The `ParquetWriter` stays open across all videos; `flush()` is called every 20 segments to avoid OOM.
 
 ## Loading the dataset
 
