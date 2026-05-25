@@ -5,6 +5,7 @@ __pycache__/
 dist/
 .env
 cookies.txt
+gemini-key.env
 corpus/
 *.log
 *.parquet
