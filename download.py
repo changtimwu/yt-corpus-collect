@@ -10,7 +10,8 @@ import yt_dlp
 
 
 def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool,
-               max_videos: int | None, cookies: str | None) -> dict:
+               max_videos: int | None, cookies: str | None,
+               sleep_interval: float | None, max_sleep_interval: float | None) -> dict:
     outtmpl = str(output_dir / "%(id)s" / "%(id)s.%(ext)s")
 
     opts: dict = {
@@ -36,6 +37,11 @@ def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool,
 
     if cookies:
         opts["cookiefile"] = cookies
+
+    if sleep_interval is not None:
+        opts["sleep_interval"] = sleep_interval
+        if max_sleep_interval is not None:
+            opts["max_sleep_interval"] = max_sleep_interval
 
     return opts
 
@@ -109,13 +115,22 @@ def main() -> None:
         "--cookies", default=None, metavar="PATH",
         help="Path to a Netscape-format cookies file (needed when YouTube triggers bot-check)",
     )
+    parser.add_argument(
+        "--sleep-interval", type=float, default=None, metavar="SECONDS",
+        help="Min seconds between video downloads (throttles to avoid YouTube session rate-limit)",
+    )
+    parser.add_argument(
+        "--max-sleep-interval", type=float, default=None, metavar="SECONDS",
+        help="Max seconds for the random sleep range (requires --sleep-interval)",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     opts = build_opts(output_dir, args.audio_format, args.lang, args.no_subs,
-                      args.max_videos, args.cookies)
+                      args.max_videos, args.cookies,
+                      args.sleep_interval, args.max_sleep_interval)
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ret = ydl.download(args.urls)
