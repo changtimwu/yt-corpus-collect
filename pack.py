@@ -290,6 +290,87 @@ def extract_records(video_dir: Path, gemini_client: genai.Client | None = None) 
     return records
 
 
+def scan_completed_parts(output_path: Path) -> tuple[set[str], int]:
+    """Look for existing rolling parts and return (already-packed video IDs, next part number).
+
+    Corrupt parts (e.g. from a kill mid-write) are deleted on the spot — their
+    videos will be re-packed into a fresh part. Only invoked when --snapshot-every
+    is set, so the single-file path is unaffected.
+    """
+    completed: set[str] = set()
+    next_part = 1
+    pattern = f'{output_path.stem}_part_*{output_path.suffix}'
+    for p in sorted(output_path.parent.glob(pattern)):
+        try:
+            pf = pq.ParquetFile(p)
+            ids = pf.read(columns=['video_id'])['video_id'].to_pylist()
+            completed.update(ids)
+            num = int(p.stem.rsplit('_', 1)[-1])
+            next_part = max(next_part, num + 1)
+        except Exception as e:
+            print(f'Resume: deleting corrupt part {p.name} ({type(e).__name__})',
+                  file=sys.stderr)
+            p.unlink()
+    return completed, next_part
+
+
+class RollingWriter:
+    """ParquetWriter that rotates to a new file every `snapshot_every` videos.
+
+    Bounds the blast radius if the process is killed mid-run (system reboot,
+    OOM, timeout): each closed part file has a valid footer and is readable
+    independently. Set snapshot_every=0 to write one monolithic file.
+    """
+
+    def __init__(self, output_path: Path, snapshot_every: int, schema: pa.Schema,
+                 start_part: int = 1):
+        self.output_path = output_path
+        self.snapshot_every = snapshot_every
+        self.schema = schema
+        self.part = start_part
+        self.videos_in_part = 0
+        self.total_segments = 0
+        self.pending: list[dict] = []
+        self._open()
+
+    def _part_path(self) -> Path:
+        if not self.snapshot_every:
+            return self.output_path
+        return self.output_path.with_name(
+            f'{self.output_path.stem}_part_{self.part:03d}{self.output_path.suffix}'
+        )
+
+    def _open(self) -> None:
+        self.writer = pq.ParquetWriter(self._part_path(), self.schema, compression='snappy')
+
+    def _flush(self) -> None:
+        if self.pending:
+            write_records(self.writer, self.pending)
+            self.total_segments += len(self.pending)
+            self.pending.clear()
+
+    def add(self, records: list[dict]) -> None:
+        self.pending.extend(records)
+        if len(self.pending) >= 200:
+            self._flush()
+        self.videos_in_part += 1
+        if self.snapshot_every and self.videos_in_part >= self.snapshot_every:
+            self._roll()
+
+    def _roll(self) -> None:
+        self._flush()
+        path = self._part_path()
+        self.writer.close()
+        print(f'  → snapshot closed: {path.name}', flush=True)
+        self.part += 1
+        self.videos_in_part = 0
+        self._open()
+
+    def close(self) -> None:
+        self._flush()
+        self.writer.close()
+
+
 def write_records(writer: pq.ParquetWriter, records: list[dict]) -> None:
     """Write a list of record dicts to the parquet writer as one batch."""
     if not records:
@@ -325,6 +406,8 @@ def main() -> None:
                         help='Pre-segment uncached videos with N concurrent Gemini calls before the sequential pack pass (default: 1, no parallelism)')
     parser.add_argument('--workers', type=int, default=1, metavar='N',
                         help='Extract audio + build records with N worker threads (default: 1, sequential). ffmpeg subprocess startup dominates per-video time, so 4-8 workers give a big speedup')
+    parser.add_argument('--snapshot-every', type=int, default=0, metavar='N',
+                        help='Close current parquet and start a new one every N videos. Bounds the blast radius if the process is killed (rolling output: <stem>_part_001.parquet, etc.). Default: 0 (one monolithic file).')
     args = parser.parse_args()
 
     corpus_dir = Path(args.corpus)
@@ -349,16 +432,23 @@ def main() -> None:
         print('Warning: GEMINI_API_KEY not set — using rule-based merge_segments() fallback.',
               file=sys.stderr)
 
+    start_part = 1
+    if args.snapshot_every:
+        completed, start_part = scan_completed_parts(Path(args.output))
+        if completed:
+            before = len(video_dirs)
+            video_dirs = [d for d in video_dirs if d.name not in completed]
+            skipped = before - len(video_dirs)
+            print(f'Resume: {skipped} videos already packed in existing parts; '
+                  f'continuing with part_{start_part:03d}')
+
     print(f'Packing {len(video_dirs)} videos → {args.output}')
 
     if args.parallel > 1 and gemini_client is not None:
         presegment_parallel(video_dirs, gemini_client, args.parallel)
 
-    total_segments = 0
-    WRITE_BUFFER = 200  # flush after this many records; ~10 typical videos worth
-    pending: list[dict] = []
-
-    with pq.ParquetWriter(args.output, SCHEMA, compression='snappy') as writer:
+    rw = RollingWriter(Path(args.output), args.snapshot_every, SCHEMA, start_part=start_part)
+    try:
         done = 0
         if args.workers > 1:
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -373,26 +463,17 @@ def main() -> None:
                         records = []
                     done += 1
                     print(f'  [{done}/{len(video_dirs)}] {d.name}: {len(records)} segments', flush=True)
-                    pending.extend(records)
-                    if len(pending) >= WRITE_BUFFER:
-                        write_records(writer, pending)
-                        total_segments += len(pending)
-                        pending.clear()
+                    rw.add(records)
         else:
             for d in video_dirs:
                 records = extract_records(d, gemini_client)
                 done += 1
                 print(f'  [{done}/{len(video_dirs)}] {d.name}: {len(records)} segments', flush=True)
-                pending.extend(records)
-                if len(pending) >= WRITE_BUFFER:
-                    write_records(writer, pending)
-                    total_segments += len(pending)
-                    pending.clear()
-        if pending:
-            write_records(writer, pending)
-            total_segments += len(pending)
+                rw.add(records)
+    finally:
+        rw.close()
 
-    print(f'\nDone. {total_segments} segments written to {args.output}')
+    print(f'\nDone. {rw.total_segments} segments written to {args.output}')
 
 
 if __name__ == '__main__':
