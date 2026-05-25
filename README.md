@@ -67,6 +67,8 @@ python pack.py [OPTIONS]
 
 Reads the corpus directory, slices each subtitle segment out of the m4a using ffmpeg, and writes a parquet file. Schema matches [ky552/ML2021_ASR_ST](https://huggingface.co/datasets/ky552/ML2021_ASR_ST).
 
+YouTube CC cues are ~1.7 s each, with no punctuation and breaks placed wherever the on-screen text scrolls — too short and too mid-thought for ASR training. Before slicing, `pack.py` runs an **LLM-assisted re-segmentation** step that groups the raw cues into sentence-complete units, and emits one parquet row per group. If `GEMINI_API_KEY` is set, Gemini (`gemini-3.1-flash-lite`) does the grouping by semantic sentence boundaries; otherwise a rule-based fallback (`merge_segments()`) accumulates cues to ~10 s targets.
+
 | Option | Default | Description |
 |---|---|---|
 | `--corpus` | `corpus/` | Corpus directory |
