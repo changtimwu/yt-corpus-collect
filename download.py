@@ -9,7 +9,8 @@ from pathlib import Path
 import yt_dlp
 
 
-def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, max_videos: int | None) -> dict:
+def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool,
+               max_videos: int | None, cookies: str | None) -> dict:
     outtmpl = str(output_dir / "%(id)s" / "%(id)s.%(ext)s")
 
     opts: dict = {
@@ -29,7 +30,12 @@ def build_opts(output_dir: Path, audio_format: str, lang: str, no_subs: bool, ma
         "subtitleslangs": [lang],
         "subtitlesformat": "vtt",
         "ignoreerrors": True,
+        # node solves YouTube's n-sig challenge via the yt-dlp-ejs distribution.
+        "js_runtimes": {"node": {}},
     })
+
+    if cookies:
+        opts["cookiefile"] = cookies
 
     return opts
 
@@ -99,12 +105,17 @@ def main() -> None:
         "--max-videos", type=int, default=None, metavar="N",
         help="Stop after downloading N videos (useful for large playlists)",
     )
+    parser.add_argument(
+        "--cookies", default=None, metavar="PATH",
+        help="Path to a Netscape-format cookies file (needed when YouTube triggers bot-check)",
+    )
     args = parser.parse_args()
 
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    opts = build_opts(output_dir, args.audio_format, args.lang, args.no_subs, args.max_videos)
+    opts = build_opts(output_dir, args.audio_format, args.lang, args.no_subs,
+                      args.max_videos, args.cookies)
 
     with yt_dlp.YoutubeDL(opts) as ydl:
         ret = ydl.download(args.urls)
