@@ -7,3 +7,4 @@ dist/
 corpus/
 *.log
 *.parquet
+*_results.csv
