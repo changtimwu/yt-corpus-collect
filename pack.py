@@ -222,14 +222,13 @@ def merge_segments(
     return merged
 
 
-def pack_video(video_dir: Path, writer: pq.ParquetWriter,
-               gemini_client: genai.Client | None = None) -> int:
-    """Pack one video dir into the writer. Returns number of segments written."""
+def extract_records(video_dir: Path, gemini_client: genai.Client | None = None) -> list[dict]:
+    """Build the parquet records for one video. Thread-safe — does no writing."""
     video_id = video_dir.name
 
     m4a_files = list(video_dir.glob('*.m4a'))
     if not m4a_files:
-        return 0
+        return []
 
     # Prefer aligned VTT (from align.py) over the raw YouTube one when present.
     # Skip Gemini-segmented VTTs here — segmentation happens in-process below.
@@ -240,7 +239,7 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter,
         vtt_files = [p for p in video_dir.glob('*.vtt')
                      if '.aligned' not in p.name and '.segmented' not in p.name]
     if not vtt_files:
-        return 0
+        return []
 
     info_path = video_dir / f'{video_id}.info.json'
     title = channel = upload_date = ''
@@ -268,56 +267,51 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter,
         if segments:
             seg_cache.write_text(json.dumps(segments, ensure_ascii=False), encoding='utf-8')
     if not segments:
-        return 0
+        return []
 
     m4a_path = m4a_files[0]
-    BATCH_SIZE = 20  # write every N segments to keep memory bounded
-    buf: dict = {k: [] for k in ('video_id', 'file', 'audio', 'transcription',
-                                  'start', 'end', 'title', 'channel', 'upload_date')}
-    written = 0
-
-    def flush(buf: dict) -> int:
-        if not buf['video_id']:
-            return 0
-        batch = pa.record_batch({
-            'video_id': pa.array(buf['video_id'], pa.string()),
-            'file': pa.array(buf['file'], pa.string()),
-            'audio': pa.array(buf['audio'], pa.struct([
-                pa.field('bytes', pa.binary()),
-                pa.field('path', pa.string()),
-            ])),
-            'transcription': pa.array(buf['transcription'], pa.string()),
-            'start': pa.array(buf['start'], pa.float32()),
-            'end': pa.array(buf['end'], pa.float32()),
-            'title': pa.array(buf['title'], pa.string()),
-            'channel': pa.array(buf['channel'], pa.string()),
-            'upload_date': pa.array(buf['upload_date'], pa.string()),
-        }, schema=SCHEMA)
-        writer.write_batch(batch)
-        n = len(buf['video_id'])
-        for v in buf.values():
-            v.clear()
-        return n
-
+    records: list[dict] = []
     for idx, seg in enumerate(segments):
         wav = extract_clip(m4a_path, seg['start'], seg['end'])
         if not wav:
             continue
         filename = f'{video_id}_{idx+1:04d}.m4a'
-        buf['video_id'].append(video_id)
-        buf['file'].append(filename)
-        buf['audio'].append({'bytes': wav, 'path': filename})
-        buf['transcription'].append(seg['text'])
-        buf['start'].append(seg['start'])
-        buf['end'].append(seg['end'])
-        buf['title'].append(title)
-        buf['channel'].append(channel)
-        buf['upload_date'].append(upload_date)
-        if len(buf['video_id']) >= BATCH_SIZE:
-            written += flush(buf)
+        records.append({
+            'video_id': video_id,
+            'file': filename,
+            'audio': {'bytes': wav, 'path': filename},
+            'transcription': seg['text'],
+            'start': seg['start'],
+            'end': seg['end'],
+            'title': title,
+            'channel': channel,
+            'upload_date': upload_date,
+        })
+    return records
 
-    written += flush(buf)
-    return written
+
+def write_records(writer: pq.ParquetWriter, records: list[dict]) -> None:
+    """Write a list of record dicts to the parquet writer as one batch."""
+    if not records:
+        return
+    cols = {k: [r[k] for r in records] for k in
+            ('video_id', 'file', 'audio', 'transcription', 'start', 'end',
+             'title', 'channel', 'upload_date')}
+    batch = pa.record_batch({
+        'video_id': pa.array(cols['video_id'], pa.string()),
+        'file': pa.array(cols['file'], pa.string()),
+        'audio': pa.array(cols['audio'], pa.struct([
+            pa.field('bytes', pa.binary()),
+            pa.field('path', pa.string()),
+        ])),
+        'transcription': pa.array(cols['transcription'], pa.string()),
+        'start': pa.array(cols['start'], pa.float32()),
+        'end': pa.array(cols['end'], pa.float32()),
+        'title': pa.array(cols['title'], pa.string()),
+        'channel': pa.array(cols['channel'], pa.string()),
+        'upload_date': pa.array(cols['upload_date'], pa.string()),
+    }, schema=SCHEMA)
+    writer.write_batch(batch)
 
 
 def main() -> None:
@@ -329,6 +323,8 @@ def main() -> None:
     parser.add_argument('--max-videos', type=int, default=None, metavar='N', help='Stop after N videos (useful for testing)')
     parser.add_argument('--parallel', type=int, default=1, metavar='N',
                         help='Pre-segment uncached videos with N concurrent Gemini calls before the sequential pack pass (default: 1, no parallelism)')
+    parser.add_argument('--workers', type=int, default=1, metavar='N',
+                        help='Extract audio + build records with N worker threads (default: 1, sequential). ffmpeg subprocess startup dominates per-video time, so 4-8 workers give a big speedup')
     args = parser.parse_args()
 
     corpus_dir = Path(args.corpus)
@@ -359,11 +355,42 @@ def main() -> None:
         presegment_parallel(video_dirs, gemini_client, args.parallel)
 
     total_segments = 0
+    WRITE_BUFFER = 200  # flush after this many records; ~10 typical videos worth
+    pending: list[dict] = []
+
     with pq.ParquetWriter(args.output, SCHEMA, compression='snappy') as writer:
-        for i, video_dir in enumerate(video_dirs, 1):
-            n = pack_video(video_dir, writer, gemini_client)
-            total_segments += n
-            print(f'  [{i}/{len(video_dirs)}] {video_dir.name}: {n} segments', flush=True)
+        done = 0
+        if args.workers > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as ex:
+                futures = {ex.submit(extract_records, d, gemini_client): d
+                           for d in video_dirs}
+                for f in concurrent.futures.as_completed(futures):
+                    d = futures[f]
+                    try:
+                        records = f.result()
+                    except Exception as e:
+                        print(f'  ERROR {d.name}: {e}', file=sys.stderr)
+                        records = []
+                    done += 1
+                    print(f'  [{done}/{len(video_dirs)}] {d.name}: {len(records)} segments', flush=True)
+                    pending.extend(records)
+                    if len(pending) >= WRITE_BUFFER:
+                        write_records(writer, pending)
+                        total_segments += len(pending)
+                        pending.clear()
+        else:
+            for d in video_dirs:
+                records = extract_records(d, gemini_client)
+                done += 1
+                print(f'  [{done}/{len(video_dirs)}] {d.name}: {len(records)} segments', flush=True)
+                pending.extend(records)
+                if len(pending) >= WRITE_BUFFER:
+                    write_records(writer, pending)
+                    total_segments += len(pending)
+                    pending.clear()
+        if pending:
+            write_records(writer, pending)
+            total_segments += len(pending)
 
     print(f'\nDone. {total_segments} segments written to {args.output}')
 
