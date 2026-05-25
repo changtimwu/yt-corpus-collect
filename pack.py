@@ -198,14 +198,22 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter,
         upload_date = info.get('upload_date', '')
 
     cues = parse_vtt(vtt_files[0])
-    if gemini_client is not None:
-        try:
-            segments = segment_with_gemini(cues, gemini_client)
-        except Exception as e:
-            print(f'    Gemini error ({e}), falling back to merge_segments', file=sys.stderr)
-            segments = merge_segments(cues)
+    # Cache segmented output next to the VTT so re-packs skip the Gemini round-trip.
+    # Delete this file if the source VTT is re-generated and you want fresh segmentation.
+    seg_cache = video_dir / f'{video_id}.zh-TW.segments.json'
+    if seg_cache.exists():
+        segments = json.loads(seg_cache.read_text(encoding='utf-8'))
     else:
-        segments = merge_segments(cues)
+        if gemini_client is not None:
+            try:
+                segments = segment_with_gemini(cues, gemini_client)
+            except Exception as e:
+                print(f'    Gemini error ({e}), falling back to merge_segments', file=sys.stderr)
+                segments = merge_segments(cues)
+        else:
+            segments = merge_segments(cues)
+        if segments:
+            seg_cache.write_text(json.dumps(segments, ensure_ascii=False), encoding='utf-8')
     if not segments:
         return 0
 
