@@ -9,3 +9,5 @@ corpus/
 *.log
 *.parquet
 *_results.csv
+pending_retry.txt
+permanent_skip.txt
