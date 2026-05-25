@@ -6,6 +6,7 @@ extracted from the m4a, matching the schema of ky552/ML2021_ASR_ST.
 """
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -133,6 +134,58 @@ def segment_with_gemini(cues: list[dict], client: genai.Client) -> list[dict]:
         }
         for g in groups
     ]
+
+
+def presegment_parallel(video_dirs: list[Path], client: genai.Client, workers: int) -> None:
+    """Fill the segment cache for every uncached video using a thread pool.
+
+    Each worker runs segment_with_gemini for one video. The sequential pack
+    loop afterwards reads the cache files and skips Gemini entirely.
+    """
+    todo: list[tuple[str, Path, Path]] = []
+    for d in video_dirs:
+        video_id = d.name
+        cache = d / f'{video_id}.zh-TW.segments.json'
+        if cache.exists():
+            continue
+        aligned = list(d.glob('*.aligned.vtt'))
+        if aligned:
+            vtt = aligned[0]
+        else:
+            vtts = [p for p in d.glob('*.vtt')
+                    if '.aligned' not in p.name and '.segmented' not in p.name]
+            if not vtts:
+                continue
+            vtt = vtts[0]
+        todo.append((video_id, vtt, cache))
+
+    if not todo:
+        print('Pre-segment: nothing to do (all videos already cached).')
+        return
+
+    print(f'Pre-segment: {len(todo)} uncached videos, {workers} concurrent Gemini calls.')
+
+    def work(item: tuple[str, Path, Path]) -> tuple[str, int, str | None]:
+        video_id, vtt_path, cache = item
+        try:
+            cues = parse_vtt(vtt_path)
+            segs = segment_with_gemini(cues, client)
+            if segs:
+                cache.write_text(json.dumps(segs, ensure_ascii=False), encoding='utf-8')
+            return video_id, len(segs), None
+        except Exception as e:
+            return video_id, 0, str(e)
+
+    done = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for vid, n, err in ex.map(work, todo):
+            done += 1
+            if err:
+                print(f'  pre-segment [{done}/{len(todo)}] {vid}: ERROR {err}', flush=True)
+            else:
+                print(f'  pre-segment [{done}/{len(todo)}] {vid}: {n} segments', flush=True)
+
+    print('Pre-segment phase complete.\n')
 
 
 def merge_segments(
@@ -274,6 +327,8 @@ def main() -> None:
     parser.add_argument('--corpus', default='corpus', help='Corpus directory (default: corpus/)')
     parser.add_argument('--output', default='dataset.parquet', help='Output parquet file (default: dataset.parquet)')
     parser.add_argument('--max-videos', type=int, default=None, metavar='N', help='Stop after N videos (useful for testing)')
+    parser.add_argument('--parallel', type=int, default=1, metavar='N',
+                        help='Pre-segment uncached videos with N concurrent Gemini calls before the sequential pack pass (default: 1, no parallelism)')
     args = parser.parse_args()
 
     corpus_dir = Path(args.corpus)
@@ -299,6 +354,9 @@ def main() -> None:
               file=sys.stderr)
 
     print(f'Packing {len(video_dirs)} videos → {args.output}')
+
+    if args.parallel > 1 and gemini_client is not None:
+        presegment_parallel(video_dirs, gemini_client, args.parallel)
 
     total_segments = 0
     with pq.ParquetWriter(args.output, SCHEMA, compression='snappy') as writer:
