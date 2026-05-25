@@ -11,10 +11,10 @@ This project downloads audio and transcripts from YouTube playlists using [yt-dl
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --pre -r requirements.txt
 ```
 
-Requirements: Python 3.10+, ffmpeg
+Requirements: Python 3.10+, ffmpeg, Node.js ≥ 20 (yt-dlp uses it to solve YouTube's n-sig challenge via the `yt-dlp-ejs` package; `--pre` is required because the YouTube counter-fixes ship as yt-dlp nightlies).
 
 ## Workflow
 

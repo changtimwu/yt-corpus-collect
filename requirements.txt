@@ -1,2 +1,4 @@
 pyarrow==24.0.0
-yt-dlp==2026.3.17
+# yt-dlp ships YouTube counter-fixes via nightlies; install with `pip install --pre -r requirements.txt`.
+# [default] extras pulls yt-dlp-ejs (n-sig solver), pycryptodomex, mutagen, brotli.
+yt-dlp[default]==2026.5.24.234402.dev0
