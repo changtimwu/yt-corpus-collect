@@ -26,6 +26,22 @@ nohup .venv/bin/python -u download.py "<playlist_url>" > download.log 2>&1 &
 - Produces `corpus/<video_id>/` dirs containing `.m4a`, `.zh-TW.vtt`, `.info.json`
 - After download, writes `corpus/manifest.csv` with a `needs_whisper` flag for videos with no subtitle
 
+### `align.py` — fix VTT timestamp drift with WhisperX (optional but recommended)
+
+```bash
+# Test on a few videos
+.venv/bin/python align.py --max-videos 3
+
+# Full corpus, background
+nohup .venv/bin/python -u align.py > align.log 2>&1 &
+```
+
+- YouTube VTT timestamps drift ~0.5–1s from the actual audio; this stage forced-aligns each cue against the m4a using a wav2vec2 model and writes `corpus/<id>/<id>.zh-TW.aligned.vtt`
+- `pack.py` automatically prefers `*.aligned.vtt` over the raw VTT when present, so no flag is needed downstream
+- Uses CUDA if available, otherwise CPU (slower). On Jetson, install the matching `torch` wheel before `whisperx`
+- Cues with mean alignment score below `--min-score` (default 0.2) are dropped — catches music/ads/mistranscribed cues. Tune lower if too many are dropped on clean speech, higher to be more aggressive
+- Re-runs are no-ops unless `--force` is passed; safe to re-invoke after adding new videos
+
 ### `pack.py` — build the parquet dataset
 
 ```bash
@@ -71,12 +87,18 @@ source ../common.env
 Two independent scripts connected by the `corpus/` directory:
 
 ```
-download.py → corpus/<id>/{.m4a, .vtt, .info.json} → pack.py → dataset.parquet
-                                                                        ↓
-                                                 search.py + twse_*.csv → results.csv
+download.py → corpus/<id>/{.m4a, .vtt, .info.json}
+                          ↓
+                  align.py (optional) → corpus/<id>/<id>.zh-TW.aligned.vtt
+                          ↓
+                       pack.py → dataset.parquet
+                                          ↓
+                          search.py + twse_*.csv → results.csv
 ```
 
 **`download.py`** is a thin wrapper around `yt_dlp.YoutubeDL`. All download behaviour is controlled by the options dict in `build_opts()`. The VTT subtitle lang code must match what YouTube actually provides — for this playlist it's `zh-TW` (manually created CC), not `zh-Hant` or `en`.
+
+**`align.py`** is an optional but recommended stage between download and pack. It reuses `pack.parse_vtt()` to read raw cues, then runs `whisperx.align()` with a wav2vec2 model (lang code `zh`) to get word-level timestamps, and writes a sibling `.aligned.vtt` with corrected per-cue start/end (min/max of word boundaries). `pack.py` picks up `*.aligned.vtt` automatically.
 
 **`pack.py`** has three stages per video: `parse_vtt()` → segmentation → `extract_clip()` (ffmpeg subprocess) → `flush()` (pyarrow batch write). The VTT deduplication in `parse_vtt()` removes consecutive identical cues — YouTube repeats the previous line in each new cue for smooth scrolling. Segmentation uses Gemini if `GEMINI_API_KEY` is set, otherwise `merge_segments()`. The `ParquetWriter` stays open across all videos; `flush()` is called every 20 segments to avoid OOM.
 

@@ -178,7 +178,14 @@ def pack_video(video_dir: Path, writer: pq.ParquetWriter,
     if not m4a_files:
         return 0
 
-    vtt_files = list(video_dir.glob('*.vtt'))
+    # Prefer aligned VTT (from align.py) over the raw YouTube one when present.
+    # Skip Gemini-segmented VTTs here — segmentation happens in-process below.
+    aligned_vtts = list(video_dir.glob('*.aligned.vtt'))
+    if aligned_vtts:
+        vtt_files = aligned_vtts
+    else:
+        vtt_files = [p for p in video_dir.glob('*.vtt')
+                     if '.aligned' not in p.name and '.segmented' not in p.name]
     if not vtt_files:
         return 0
 
