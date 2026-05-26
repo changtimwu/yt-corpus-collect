@@ -99,6 +99,16 @@ Parquet schema:
 | `channel` | string | Channel name |
 | `upload_date` | string | Upload date (`YYYYMMDD`) |
 
+#### Inspecting a parquet without loading audio
+
+`audio.bytes` is most of the file weight, so a quick text-only sample needs to project the audio column away to stay fast. `peek.sh` does this — prints `video_id  start-end  transcription` for the first N rows of one file or a glob:
+
+```bash
+./peek.sh dataset.parquet               # first 20 rows
+./peek.sh dataset.parquet 50            # first 50
+./peek.sh 'dataset_part_*.parquet' 100  # first 100 across rolling parts
+```
+
 ---
 
 ### Step 3 — Fine-tune
