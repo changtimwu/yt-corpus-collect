@@ -134,3 +134,36 @@ ds = load_dataset("parquet", data_files="dataset.parquet", split="train")
 ```
 
 The `audio` column is automatically decoded to a numpy array at 16 kHz by the `datasets` library, compatible with Whisper, wav2vec2, and most other ASR/TTS fine-tuning frameworks.
+
+---
+
+## Adding more videos later (incremental update)
+
+Both the Gemini segmentation and the parquet packing are fully incremental — adding 100 new videos costs roughly **$0.10 in Gemini + ~20 min of ffmpeg**, not a full re-pack. Two caches do the work:
+
+- **Per-video segmentation cache** — `corpus/<id>/<id>.zh-TW.segments.json` is written once per video; subsequent `pack.py` runs read it and skip Gemini entirely.
+- **Rolling parquet resume** — when `--snapshot-every N` is set, `pack.py` calls `scan_completed_parts()` at startup, reads `video_id` from every existing `dataset_part_*.parquet`, and removes those IDs from the work queue. Existing part files stay untouched; new rows go into a fresh `dataset_part_NNN.parquet` starting at the next free part number.
+
+### Workflow
+
+```bash
+# 1. Download new IDs
+.venv/bin/python download.py --cookies cookies.txt \
+  --sleep-interval 4 --max-sleep-interval 10 \
+  <NEW_VIDEO_URLS>
+
+# 2. Re-run pack — it auto-detects what's already done
+nohup bash -c 'set -a && source gemini-key.env && set +a && \
+  .venv/bin/python -u pack.py --parallel 32 --workers 4 --snapshot-every 50 \
+  --output dataset.parquet' > pack.log 2>&1 &
+
+# pack.log will say:
+#   Resume: NNNN videos already packed in existing parts; continuing with part_NNN
+#   Packing K videos → dataset.parquet           ← only the new ones
+#   Pre-segment: K uncached videos, 32 concurrent Gemini calls.
+```
+
+### Caveats
+
+- **If you re-download a VTT** (e.g. YouTube fixed a transcript, or you re-ran `align.py`), the segmentation cache is now stale. Delete the matching `<id>.zh-TW.segments.json` to force re-segmentation. The already-packed rows in `dataset_part_*.parquet` are also frozen against the old VTT — delete the parts containing that `video_id` if you want them rebuilt.
+- **Resume is keyed by `video_id`, not by segmentation strategy.** If you change strategies (e.g. flip Gemini → rule-based, or switch to the pair-merge approach from #2), you have to delete the existing parts. The segmentation cache still saves the Gemini cost, so even a full strategy change is cheap on the API side.
