@@ -12,3 +12,5 @@ corpus/
 *_results.csv
 pending_retry.txt
 permanent_skip.txt
+new_retry.txt
+playlist_audit.csv
