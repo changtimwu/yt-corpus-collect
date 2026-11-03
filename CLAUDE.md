@@ -21,10 +21,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 nohup .venv/bin/python -u download.py "<playlist_url>" > download.log 2>&1 &
 ```
 
+- **When downloads start failing (esp. audio `HTTP Error 403` while subs still download), upgrade yt-dlp first**: `.venv/bin/pip install --pre -U "yt-dlp[default]"`. See README *Download lessons learned* for rate limits, cookie rotation, and JS-runtime warnings
 - Default lang is `zh-TW` (this corpus is Taiwanese content); change with `--lang`
 - Default audio format is `m4a` (no re-encoding); use `--audio-format wav` only when downstream tools require it
 - Produces `corpus/<video_id>/` dirs containing `.m4a`, `.zh-TW.vtt`, `.info.json`
 - After download, writes `corpus/manifest.csv` with a `needs_whisper` flag for videos with no subtitle
+
+### `fetch_youtube.py` — one-off download, no venv
+
+```bash
+python3 fetch_youtube.py "https://www.youtube.com/watch?v=<id>" [-o corpus] [--info-json] [--no-auto-subs]
+```
+
+- Shells out to the `yt-dlp` CLI (not the module), so it works outside `.venv`. Same `corpus/<id>/` layout as `download.py`
+- Exits non-zero when a video ends up without audio or subtitles. Passes `--` before URLs because YouTube IDs can start with `-`
+
+### `classify_failures.py` — triage failed IDs after a long run
+
+```bash
+python3 classify_failures.py download.log resume.log --corpus corpus --retry pending_retry.txt --skip permanent_skip.txt
+```
+
+- Last error per ID wins (pass logs oldest-first). Rate limit / bot check / timeout / 5xx count as retry; private / removed count as skip. `--corpus` drops IDs that later succeeded
+- "Video unavailable. This content isn't available, try again later" is a rate limit, so retryable patterns are checked first. When a new failure message shows up as `unknown`, add its pattern here
 
 ### `align.py` — fix VTT timestamp drift with WhisperX (optional but recommended)
 
