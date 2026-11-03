@@ -1,4 +1,6 @@
-pyarrow==24.0.0
+# download.py needs this; fetch_youtube.py uses the yt-dlp CLI.
 # yt-dlp ships YouTube counter-fixes via nightlies; install with `pip install --pre -r requirements.txt`.
 # [default] extras pulls yt-dlp-ejs (n-sig solver), pycryptodomex, mutagen, brotli.
-yt-dlp[default]==2026.5.24.234402.dev0
+# Floor, not an exact pin: an exact pin goes stale within months (2026.5.24 nightly
+# got HTTP 403 on audio by 2026-11). Upgrade with `pip install --pre -U "yt-dlp[default]"`.
+yt-dlp[default]>=2026.10.29

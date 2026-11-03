@@ -46,6 +46,13 @@ python download.py --max-videos 50 "https://www.youtube.com/playlist?list=..."
 python download.py "https://www.youtube.com/playlist?list=..."
 ```
 
+**Just one or a few videos?** `fetch_youtube.py` writes the same layout using the `yt-dlp` CLI (`brew install yt-dlp`), with no `.venv` needed. It takes uploader subs when they exist and falls back to auto-captions (`--no-auto-subs` to refuse those). It exits non-zero if a video ends up without audio or subtitles. Bare IDs starting with `-` are fine.
+
+```bash
+python3 fetch_youtube.py "https://www.youtube.com/watch?v=_4SUBYKiN9E"
+python3 fetch_youtube.py --info-json --lang 'zh-TW,zh-Hant' <url> [<url> ...]
+```
+
 Corpus layout after download:
 
 ```
@@ -91,7 +98,7 @@ Parquet schema:
 |---|---|---|
 | `video_id` | string | YouTube video ID |
 | `file` | string | Segment filename (e.g. `abc123_0001.wav`) |
-| `audio` | struct `{bytes, path}` | 16 kHz mono WAV clip embedded as bytes |
+| `audio` | struct `{bytes, path}` | Clip embedded as bytes: the source **AAC stream copied into MP4** (`-c:a copy -f mp4`), not decoded. Usually 44.1/48 kHz stereo; resample to 16 kHz mono before training |
 | `transcription` | string | Subtitle text for this segment |
 | `start` | float32 | Segment start time (seconds) |
 | `end` | float32 | Segment end time (seconds) |
@@ -163,7 +170,96 @@ nohup bash -c 'set -a && source gemini-key.env && set +a && \
 #   Pre-segment: K uncached videos, 32 concurrent Gemini calls.
 ```
 
+### Retrying failed downloads
+
+Every long run ends with some failed IDs, and they need opposite handling. Rate limits, bot checks, timeouts and 503s clear up later. Private and removed videos never will. `classify_failures.py` reads the yt-dlp logs (oldest first; the last error per ID wins) and writes the two lists. `--corpus` drops IDs that a later pass did download, because a success leaves no log line to override the earlier error:
+
+```bash
+python3 classify_failures.py download.log resume.log --corpus corpus \
+  --retry pending_retry.txt --skip permanent_skip.txt
+.venv/bin/python download.py --cookies cookies.txt --sleep-interval 4 --max-sleep-interval 10 \
+  $(sed 's|^|https://www.youtube.com/watch?v=|' pending_retry.txt)
+```
+
+On this corpus's three download passes it reproduced the hand-made lists. Of ~90 failed IDs, 33 were permanent and the rest retryable.
+
 ### Caveats
 
 - **If you re-download a VTT** (e.g. YouTube fixed a transcript, or you re-ran `align.py`), the segmentation cache is now stale. Delete the matching `<id>.zh-TW.segments.json` to force re-segmentation. The already-packed rows in `dataset_part_*.parquet` are also frozen against the old VTT — delete the parts containing that `video_id` if you want them rebuilt.
 - **Resume is keyed by `video_id`, not by segmentation strategy.** If you change strategies (e.g. flip Gemini → rule-based, or switch to the pair-merge approach from #2), you have to delete the existing parts. The segmentation cache still saves the Gemini cost, so even a full strategy change is cheap on the API side.
+
+---
+
+## Download lessons learned
+
+Collected while downloading this ~1,700-video zh-TW corpus (initial run plus two resume passes). Segmentation, cue de-duplication and timestamp drift are covered under *Pack* and in `align.py`.
+
+### Audio
+
+- **Keep the m4a. Don't transcode at download time.** `-f bestaudio[ext=m4a]` saves
+  YouTube's AAC stream byte-for-byte. Convert to WAV later, per consumer: each ASR
+  stack wants something slightly different (sample rate, channel count, RIFF quirks).
+- **The m4a is usually 44.1/48 kHz stereo**, not 16 kHz mono. Two consequences we
+  ran into:
+  - Azure batch transcription of a stereo file **emits phrases for both channels**,
+    so every phrase shows up twice. Downmix or keep one channel (`-ac 1`) first.
+  - `pack.py` stream-copies the AAC into each parquet clip, so the parquet's audio
+    is **not** 16 kHz mono WAV either (this README used to say it was). Downstream
+    consumers must decode and resample themselves.
+- **Never pipe ffmpeg's WAV output** (`-f wav pipe:1`). A pipe isn't seekable, so
+  ffmpeg can't go back and fill in the RIFF and `data` chunk sizes; both stay
+  `0xFFFFFFFF`. ffprobe and HuggingFace don't mind; Azure Custom Speech rejects
+  every clip ("Duration in the wave file's header does not match the file size").
+  Always write to a real file path.
+
+### Subtitles
+
+- **Pick the language code YouTube actually serves.** Taiwanese channels' manual
+  captions are `zh-TW`, not `zh-Hant`/`zh`. Run `yt-dlp --list-subs <url>` when
+  unsure. `--lang` accepts a comma list if channels vary.
+- **Manual beats auto.** With `--write-subs --write-auto-subs`, yt-dlp takes the
+  uploader's track when one exists for that language and only falls back to ASR
+  auto-captions otherwise. Use `--no-auto-subs` if machine captions would contaminate
+  a reference set; auto-captions are another ASR system's hypothesis, not ground truth.
+- **Expect ~13% of videos to have no subtitles at all.** In our corpus, 1,336 of
+  1,545 videos had a `zh-TW` track. `download.py` writes `manifest.csv` with a
+  `needs_whisper` flag for those.
+
+### Getting blocked (the part that costs the most time)
+
+- **A JS runtime is mandatory now.** YouTube's n-sig challenge is solved through
+  `yt-dlp-ejs`, and yt-dlp only enables **deno** by default. With only node installed
+  you get thousands of `No supported JavaScript runtime` warnings and missing
+  formats. Pass `--js-runtimes node` (`download.py` and `fetch_youtube.py` both do), or install deno.
+- **Stay on recent yt-dlp.** YouTube counter-fixes often ship as nightlies first,
+  so install with `pip install --pre`.
+  When downloads that used to work start failing, upgrade before you debug. Typical
+  symptom: subtitles and info.json download fine but the audio fails with
+  **`HTTP Error 403: Forbidden`**. A May 2026 nightly did exactly that by Nov 2026;
+  upgrading fixed it. That's why `requirements.txt` sets a minimum version, not an exact pin.
+- **Throttle long runs.** Unthrottled playlist runs hit *"The current session has been
+  rate-limited by YouTube for up to an hour"*. `--sleep-interval 4
+  --max-sleep-interval 10` kept 1,500+ videos going. A rate-limited ID is **not**
+  dead: retry it after an hour.
+- **"Sign in to confirm you're not a bot"** needs cookies: export a Netscape
+  `cookies.txt` from a logged-in browser and pass `--cookies`. **Cookies rotate.**
+  A resume run produced 112 *"cookies are no longer valid"* warnings followed by
+  53 bot-check failures. Export fresh cookies right before each long run, and use a
+  throwaway account. **Never commit `cookies.txt`** (it's in `.gitignore`).
+- **Keep retryable and permanent failures apart.** Out of ~90 failed IDs over three
+  passes: 33 were private/removed (permanent, skip them forever), and the rest were
+  rate limits, bot checks, timeouts or 503s that mostly succeeded on a later pass.
+  `classify_failures.py` makes the split from the logs. Note that *"Video
+  unavailable. This content isn't available, try again later"* is a **rate limit**,
+  even though it starts with "Video unavailable".
+- **Ignore `no impersonate target is available`.** That warning only means
+  `curl_cffi` isn't installed. Downloads work without it.
+- **Log everything** (`nohup … > download.log 2>&1 &`). The log is the only record of
+  *why* an ID failed; a success leaves no line, so a later success doesn't overwrite
+  an earlier error (`classify_failures.py --corpus` handles that).
+
+### Shell gotchas
+
+- YouTube IDs can start with `-` (e.g. `-AbCdEfGhIj`). Put `--` before bare IDs
+  (`fetch_youtube.py` does this internally), and quote them in shell loops.
+- Always quote URLs: `&list=…` is a shell background operator.
