@@ -9,6 +9,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - All large files (corpus, parquet, logs) live in this directory on the mounted SSD (`/ssd/devhome/work`). **Never write large files to `/tmp`** — internal storage is limited
 - The system has ~7.4GB RAM with limited headroom; avoid accumulating large in-memory buffers
 
+## Documentation
+
+- `README.md` (English) and `README.zh-TW.md` (Traditional Chinese) must stay in sync: any change to one must be mirrored in the other in the same commit. Keep code blocks, CLI flags, and quoted error messages in English in both
+
 ## Scripts
 
 ### `download.py` — fetch from YouTube
