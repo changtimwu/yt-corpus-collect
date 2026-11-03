@@ -1,12 +1,39 @@
 # yt-corpus-collect
 
+**English** | [繁體中文](README.zh-TW.md)
+
 A tool for collecting voice and text data from YouTube as training material for ASR (Automatic Speech Recognition) and TTS (Text-to-Speech) models.
 
 ## Overview
 
 This project downloads audio and transcripts from YouTube playlists using [yt-dlp](https://github.com/yt-dlp/yt-dlp), then packs them into a [HuggingFace-compatible](https://huggingface.co/docs/datasets) parquet dataset — one row per subtitle segment with embedded audio, ready for fine-tuning.
 
-## Setup
+## Setup (macOS / Linux)
+
+> [!NOTE]
+> These steps are for **macOS and Linux** only. The scripts and examples rely on a POSIX shell (`bash`/`zsh`, `nohup`, `source`, `peek.sh`). Windows is untested; use WSL2 there.
+
+Requirements: Python 3.10+, ffmpeg, Node.js ≥ 20 (yt-dlp uses it to solve YouTube's n-sig challenge via the `yt-dlp-ejs` package).
+
+**1. Install system packages**
+
+macOS (Homebrew):
+
+```bash
+brew install python ffmpeg node
+```
+
+Linux (Debian/Ubuntu):
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip ffmpeg
+# The distro's nodejs package is often older than 20. Install Node.js ≥ 20
+# from NodeSource or nvm, then check:
+node --version
+```
+
+**2. Create the virtualenv and install Python dependencies**
 
 ```bash
 python3 -m venv .venv
@@ -14,7 +41,7 @@ source .venv/bin/activate
 pip install --pre -r requirements.txt
 ```
 
-Requirements: Python 3.10+, ffmpeg, Node.js ≥ 20 (yt-dlp uses it to solve YouTube's n-sig challenge via the `yt-dlp-ejs` package; `--pre` is required because the YouTube counter-fixes ship as yt-dlp nightlies).
+`--pre` is required because YouTube counter-fixes ship as yt-dlp nightlies.
 
 ## Workflow
 
